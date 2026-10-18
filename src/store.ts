@@ -44,6 +44,9 @@ export interface NewRunInput extends PlanInput {
   goal: string;
   budgetUSD: number;
   integrationBranch: string;
+  modelChain?: string[];
+  maxAttempts?: number;
+  maxParallel?: number;
 }
 
 let counter = 0;
@@ -70,6 +73,9 @@ export async function createRun(storage: StorageLike, input: NewRunInput): Promi
     budgetUSD: input.budgetUSD,
     costUSD: 0,
     integrationBranch: input.integrationBranch,
+    modelChain: input.modelChain && input.modelChain.length > 0 ? input.modelChain : ["opencode/beam-free"],
+    maxAttempts: input.maxAttempts && input.maxAttempts > 0 ? Math.min(input.maxAttempts, 10) : 3,
+    maxParallel: input.maxParallel && input.maxParallel > 0 ? Math.min(input.maxParallel, 8) : 2,
     worktrees: {},
     events: [{ at: now, kind: "created", detail: `goal: ${input.goal.trim()}` }],
     createdAt: now,

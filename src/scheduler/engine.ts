@@ -262,6 +262,11 @@ async function settleTask(
       }
     }
 
+    // Cancelled or paused runs accept the accounting but no longer flip task states.
+    if (run.status === "cancelled" || run.status === "paused") {
+      return;
+    }
+
     if (input.success) {
       task.status = "passed";
       await recordEvent(run, "task_passed", taskID);
