@@ -96,20 +96,34 @@ function seqOf(id: string) {
   return Number.isFinite(suffix) ? suffix : 0;
 }
 
-/** Loads the run, mutates it, and persists. Throws for unknown ids. */
+/** Loads the run, mutates it, and persists. Throws for unknown ids. Mutations are serialized per run. */
+const locks = new Map<string, Promise<unknown>>();
+
+function withLock<T>(key: string, apply: () => Promise<T>): Promise<T> {
+  const previous = locks.get(key) ?? Promise.resolve();
+  const next = previous.then(apply, apply);
+  locks.set(
+    key,
+    next.catch(() => undefined),
+  );
+  return next;
+}
+
 export async function updateRun(
   storage: StorageLike,
   id: string,
   apply: (run: RunState) => Promise<void> | void,
 ): Promise<RunState> {
-  const run = await getRun(storage, id);
-  if (!run) {
-    throw new Error(`unknown run ${id}`);
-  }
-  await apply(run);
-  run.updatedAt = createdMs();
-  await storage.set(keyFor(id), serialize(run));
-  return run;
+  return withLock(id, async () => {
+    const run = await getRun(storage, id);
+    if (!run) {
+      throw new Error(`unknown run ${id}`);
+    }
+    await apply(run);
+    run.updatedAt = createdMs();
+    await storage.set(keyFor(id), serialize(run));
+    return run;
+  });
 }
 
 export async function recordEvent(run: RunState, kind: string, detail: string): Promise<void> {
