@@ -59,6 +59,8 @@ export interface RunState extends PlanInput {
   costUSD: number;
   /** Integration branch that receives accepted task work. */
   integrationBranch: string;
+  /** Agent used for engineer sessions. */
+  engineerAgent: string;
   /** Escalation chain used by tasks without a per-task model. */
   modelChain: ModelRef[];
   maxAttempts: number;

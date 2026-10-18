@@ -22,6 +22,7 @@ export interface SessionClientLike {
 
 export interface EngineOptions {
   workdir: string;
+  agent: string;
   /** Escalation chain used by tasks without a per-task model. */
   modelChain: ModelRef[];
   maxAttempts?: number;
@@ -204,7 +205,7 @@ async function attemptTask(
   try {
     const handle = await client.run({
       title: `${run?.goal ?? runID} / ${taskID}`,
-      agent: "engineer",
+      agent: options.agent,
       model: attempt.model,
       directory: options.workdir,
       prompt: task.prompt,

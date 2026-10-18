@@ -18,6 +18,7 @@ export interface StartInput {
   budgetUSD: number;
   integrationBranch: string;
   tasks: TaskSpec[];
+  engineerAgent?: string;
   modelChain?: string[];
   maxAttempts?: number;
   maxParallel?: number;
@@ -72,6 +73,7 @@ export function createRegistry(deps: RegistryDeps) {
 
   const engineOptions = (run: RunState): EngineOptions => ({
     workdir: deps.directory,
+    agent: run.engineerAgent,
     modelChain: run.modelChain,
     maxAttempts: run.maxAttempts,
     maxParallel: run.maxParallel,
@@ -139,6 +141,7 @@ export function createRegistry(deps: RegistryDeps) {
         budgetUSD: input.budgetUSD,
         integrationBranch: input.integrationBranch,
         tasks: input.tasks,
+        engineerAgent: input.engineerAgent,
         modelChain: input.modelChain,
         maxAttempts: input.maxAttempts,
         maxParallel: input.maxParallel,

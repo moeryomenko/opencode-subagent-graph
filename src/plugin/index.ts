@@ -69,6 +69,7 @@ function readStart(input: Record<string, unknown>): StartInput {
     tasks: readTasks(input),
     budgetUSD: budgetUSD ?? 0.5,
     integrationBranch: readOptionalString(input, "integrationBranch") ?? "orchestrator/integration",
+    engineerAgent: readOptionalString(input, "engineerAgent"),
     modelChain: input.modelChain !== undefined
       ? readString(input, "modelChain").split(",")
       : undefined,
@@ -115,6 +116,7 @@ export default Plugin.define({
             tasks: { type: "array" },
             budgetUSD: { type: "number" },
             integrationBranch: { type: "string" },
+            engineerAgent: { type: "string" },
             modelChain: { type: "string" },
             maxAttempts: { type: "number" },
             maxParallel: { type: "number" },

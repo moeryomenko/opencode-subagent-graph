@@ -49,7 +49,7 @@ describe("driveRun", () => {
     const created = await createRun(storage, newRun);
     const { client, calls } = sequentialClient([]);
 
-    await driveRun(storage, created.id, client, { workdir: "/proj", modelChain: ["m1"] });
+    await driveRun(storage, created.id, client, { workdir: "/proj", agent: "engineer", modelChain: ["m1"] });
 
     const run = await import("../src/store.ts").then((m) => m.getRun(storage, created.id));
     expect(run?.status).toBe("completed");
@@ -66,7 +66,7 @@ describe("driveRun", () => {
     await driveRun(storage, created.id, client, {
       workdir: "/proj",
       modelChain: ["m1", "m2"],
-      maxAttempts: 2,
+      agent: "engineer", maxAttempts: 2,
     });
 
     const run = await import("../src/store.ts").then((m) => m.getRun(storage, created.id));
@@ -84,7 +84,7 @@ describe("driveRun", () => {
     await driveRun(storage, created.id, client, {
       workdir: "/proj",
       modelChain: ["m1", "m2"],
-      maxAttempts: 2,
+      agent: "engineer", maxAttempts: 2,
     });
 
     const run = await import("../src/store.ts").then((m) => m.getRun(storage, created.id));
@@ -98,7 +98,7 @@ describe("driveRun", () => {
     const created = await createRun(storage, { ...newRun, tasks: [task("a", [], "custom/one")] });
     const { client, calls } = sequentialClient([]);
 
-    await driveRun(storage, created.id, client, { workdir: "/proj", modelChain: ["m1"] });
+    await driveRun(storage, created.id, client, { workdir: "/proj", agent: "engineer", modelChain: ["m1"] });
 
     const run = await import("../src/store.ts").then((m) => m.getRun(storage, created.id));
     expect(run?.status).toBe("completed");
@@ -110,7 +110,7 @@ describe("driveRun", () => {
     const created = await createRun(storage, { ...newRun, tasks: [task("b", ["a"]), task("a")] });
     const { client, calls } = sequentialClient([]);
 
-    await driveRun(storage, created.id, client, { workdir: "/proj", modelChain: ["m1"] });
+    await driveRun(storage, created.id, client, { workdir: "/proj", agent: "engineer", modelChain: ["m1"] });
 
     const run = await import("../src/store.ts").then((m) => m.getRun(storage, created.id));
     expect(run?.status).toBe("completed");
@@ -130,7 +130,7 @@ describe("driveRun", () => {
     await driveRun(storage, created.id, client, {
       workdir: "/proj",
       modelChain: ["m1"],
-      maxParallel: 1,
+      agent: "engineer", maxParallel: 1,
     });
 
     const run = await import("../src/store.ts").then((m) => m.getRun(storage, created.id));
@@ -148,13 +148,13 @@ describe("driveRun", () => {
     await store.updateRun(storage, created.id, (run) => {
       run.status = "paused";
     });
-    await driveRun(storage, created.id, client, { workdir: "/proj", modelChain: ["m1"] });
+    await driveRun(storage, created.id, client, { workdir: "/proj", agent: "engineer", modelChain: ["m1"] });
     expect(calls).toHaveLength(0);
 
     await store.updateRun(storage, created.id, (run) => {
       run.status = "running";
     });
-    await driveRun(storage, created.id, client, { workdir: "/proj", modelChain: ["m1"] });
+    await driveRun(storage, created.id, client, { workdir: "/proj", agent: "engineer", modelChain: ["m1"] });
     expect(calls).toHaveLength(2);
 
     const run = await store.getRun(storage, created.id);
@@ -176,7 +176,7 @@ describe("driveRun", () => {
       },
     };
 
-    await driveRun(storage, created.id, client, { workdir: "/proj", modelChain: ["m1"], maxParallel: 2 });
+    await driveRun(storage, created.id, client, { workdir: "/proj", agent: "engineer", modelChain: ["m1"], maxParallel: 2 });
 
     expect(peak).toBe(2);
     const run = await import("../src/store.ts").then((m) => m.getRun(storage, created.id));
