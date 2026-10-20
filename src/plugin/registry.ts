@@ -1,8 +1,8 @@
 import { driveRun, type EngineOptions, type SessionClientLike } from "../scheduler/engine.ts";
-import { makeSessionClient, type OpenCodeSessionApi } from "../opencode-session.ts";
+import { makeSessionClient, type OpenCodeSessionApi, type OrchestratorSessionClient } from "../opencode-session.ts";
 import { createRun, getRun, listRuns, recordEvent, updateRun, type StorageLike } from "../store.ts";
 import { toTaskStates, validatePlan } from "../plan.ts";
-import type { RunState, TaskSpec } from "../types.ts";
+import type { RunOwner, RunState, TaskSpec } from "../types.ts";
 
 export interface RegistryDeps {
   storage: StorageLike;
@@ -22,6 +22,7 @@ export interface StartInput {
   modelChain?: string[];
   maxAttempts?: number;
   maxParallel?: number;
+  owner?: RunOwner;
 }
 
 export interface RunDetail {
@@ -79,13 +80,13 @@ export function createRegistry(deps: RegistryDeps) {
     maxParallel: run.maxParallel,
   });
 
-  function spawn(runID: string) {
+  function spawn(runID: string, driverClient: SessionClientLike = client) {
     const promise = (async () => {
       const run = await getRun(deps.storage, runID);
       if (!run) {
         return;
       }
-      await driveRun(deps.storage, runID, client, engineOptions(run));
+      await driveRun(deps.storage, runID, driverClient, engineOptions(run));
     })().catch(() => undefined);
     activeDrivers.add(promise);
     void promise.then(
@@ -145,6 +146,7 @@ export function createRegistry(deps: RegistryDeps) {
         modelChain: input.modelChain,
         maxAttempts: input.maxAttempts,
         maxParallel: input.maxParallel,
+        owner: input.owner,
       });
       return {
         runID: created.id,
@@ -154,8 +156,11 @@ export function createRegistry(deps: RegistryDeps) {
       };
     },
 
-    async approve(runID: string) {
+    async approve(runID: string, driverClient?: OrchestratorSessionClient, caller?: RunOwner) {
       const run = await requireRun(runID);
+      if (run.owner && caller && (run.owner.sessionID !== caller.sessionID || run.owner.agent !== caller.agent)) {
+        throw new Error("only the session and agent that created the run can approve it");
+      }
       if (run.status !== "awaiting_approval") {
         throw new Error(`run ${runID} is not awaiting approval (status ${run.status})`);
       }
@@ -165,7 +170,7 @@ export function createRegistry(deps: RegistryDeps) {
           await recordEvent(current, "approved", "user approved the plan");
         }
       });
-      spawn(runID);
+      spawn(runID, driverClient);
       return { runID, status: "running", message: "Run started." };
     },
 
@@ -179,16 +184,7 @@ export function createRegistry(deps: RegistryDeps) {
           current.status = "paused";
           await recordEvent(current, "paused", "user paused the run");
         }
-        for (const task of current.tasks) {
-          if (task.status === "in_progress") {
-            task.status = "pending";
-            await recordEvent(current, "task_requeued", `${task.id} requeued while paused`);
-          }
-        }
       });
-      for (const sessionID of activeSessionIDs(run)) {
-        await client.interrupt(sessionID).catch(() => undefined);
-      }
       return { runID, status: "paused" };
     },
 
@@ -300,6 +296,21 @@ export function createRegistry(deps: RegistryDeps) {
       };
     },
 
+    async statusForSession(sessionID: string): Promise<RunsOverview> {
+      const runs = (await listRuns(deps.storage)).filter((run) => run.owner?.sessionID === sessionID);
+      return {
+        runs: runs.map((run) => ({
+          runID: run.id,
+          goal: run.goal,
+          status: run.status,
+          costUSD: run.costUSD,
+          budgetUSD: run.budgetUSD,
+          tasksPassed: run.tasks.filter((task) => task.status === "passed").length,
+          tasksTotal: run.tasks.length,
+        })),
+      };
+    },
+
     async report(runID?: string) {
       const run = runID !== undefined ? await requireRun(runID) : (await listRuns(deps.storage))[0];
       if (!run) {
@@ -317,16 +328,15 @@ export function createRegistry(deps: RegistryDeps) {
       for (const run of runs) {
         const orphaned = run.tasks.filter((task) => task.status === "in_progress");
         if (run.status === "running") {
-          for (const _task of orphaned) {
+          for (const task of orphaned) {
             await updateRun(deps.storage, run.id, async (current) => {
-              const match = current.tasks.find((candidate) => candidate.id === _task.id);
-              if (match && match.status === "in_progress") {
-                match.status = "pending";
-                await recordEvent(current, "reconciled", `${match.id} requeued after restart`);
+              const match = current.tasks.find((candidate) => candidate.id === task.id);
+              if (match?.status === "in_progress") {
+                await recordEvent(current, "reconciled", `${match.id} retains its child session after restart`);
               }
             });
           }
-          if (run.tasks.some((task) => task.status === "pending" || task.status === "in_progress")) {
+          if (run.tasks.some((task) => task.status === "pending")) {
             spawn(run.id);
             resumed.push(run.id);
           }

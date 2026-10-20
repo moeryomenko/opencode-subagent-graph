@@ -1,6 +1,6 @@
 import { toTaskStates } from "./plan.ts";
 import { MemoryStorage, type StorageLike } from "./storage/memory.ts";
-import type { PlanInput, RunState } from "./types.ts";
+import type { PlanInput, RunOwner, RunState } from "./types.ts";
 
 const KEY_PREFIX = "orchestrator:run:";
 const KEY_RE = /^orchestrator:run:(.+)$/;
@@ -48,6 +48,7 @@ export interface NewRunInput extends PlanInput {
   modelChain?: string[];
   maxAttempts?: number;
   maxParallel?: number;
+  owner?: RunOwner;
 }
 
 let counter = 0;
@@ -70,6 +71,7 @@ export async function createRun(storage: StorageLike, input: NewRunInput): Promi
     id,
     goal: input.goal.trim(),
     status: "awaiting_approval",
+    owner: input.owner,
     tasks: toTaskStates(input),
     budgetUSD: input.budgetUSD,
     costUSD: 0,

@@ -17,6 +17,8 @@ export interface SessionClientLike {
     model: ModelRef;
     directory: string;
     prompt: string;
+    /** Called as soon as the builtin tool reports the child session. */
+    onStarted?: (sessionID: string) => Promise<void>;
   }): Promise<SessionHandle>;
 }
 
@@ -209,6 +211,16 @@ async function attemptTask(
       model: attempt.model,
       directory: options.workdir,
       prompt: task.prompt,
+      onStarted: async (sessionID) => {
+        await updateRun(storage, runID, async (current) => {
+          const currentTask = current.tasks.find((candidate) => candidate.id === taskID);
+          const currentAttempt = currentTask?.attempts.at(-1);
+          if (currentTask?.status === "in_progress" && currentAttempt && !currentAttempt.sessionID) {
+            currentAttempt.sessionID = sessionID;
+            await recordEvent(current, "child_started", `${taskID} -> ${sessionID}`);
+          }
+        });
+      },
     });
     return await settleTask(storage, runID, taskID, {
       success: handle.outcome === "succeeded",
@@ -263,8 +275,9 @@ async function settleTask(
       }
     }
 
-    // Cancelled or paused runs accept the accounting but no longer flip task states.
-    if (run.status === "cancelled" || run.status === "paused") {
+    // A cancelled run records cost only. A paused run settles active children,
+    // but does not dispatch their dependants until it resumes.
+    if (run.status === "cancelled") {
       return;
     }
 

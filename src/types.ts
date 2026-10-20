@@ -50,10 +50,21 @@ export interface RunEvent {
   detail: string;
 }
 
+export interface RunOwner {
+  /** Parent chat session that owns the run. */
+  sessionID: string;
+  /** Agent that the host must use for builtin dispatch permission checks. */
+  agent: string;
+  /** Directory associated with the parent session. */
+  directory: string;
+}
+
 export interface RunState extends PlanInput {
   id: string;
   goal: string;
   status: RunStatus;
+  /** Identity that created this run. Older persisted runs have no owner. */
+  owner?: RunOwner;
   tasks: TaskState[];
   budgetUSD: number;
   costUSD: number;

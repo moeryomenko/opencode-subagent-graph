@@ -202,7 +202,7 @@ describe("registry", () => {
     expect(deps.reportPaths).toContain(path);
   });
 
-  test("reconcile resets orphaned in-progress tasks and resumes runs", async () => {
+  test("reconcile retains orphaned child sessions and does not duplicate dispatch", async () => {
     const deps = makeDeps();
     const registry = createRegistry(deps);
     const started = await registry.start(startInput());
@@ -214,10 +214,11 @@ describe("registry", () => {
 
     const summary = await registry.reconcile();
 
-    expect(summary.resumed).toEqual([started.runID]);
+    expect(summary.resumed).toEqual([]);
     await registry.idle();
     const run = await getRun(deps.storage, started.runID);
-    expect(run?.tasks[0].status).toBe("passed");
+    expect(run?.tasks[0].status).toBe("in_progress");
+    expect(run?.events.at(-1)?.kind).toBe("reconciled");
   });
 
   test("reconcile leaves paused runs alone", async () => {

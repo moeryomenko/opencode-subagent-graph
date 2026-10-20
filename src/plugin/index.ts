@@ -1,9 +1,15 @@
 import { Plugin } from "@opencode/plugin";
 import type { Context } from "@opencode/plugin/promise/plugin";
-import type { ToolEditor } from "@opencode/plugin/promise/tool";
-import { mkdir, writeFile } from "node:fs/promises";
+import type { ToolContext, ToolEditor } from "@opencode/plugin/promise/tool";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRegistry, type RegistryDeps, type StartInput } from "./registry.ts";
-import type { OpenCodeSessionApi } from "../opencode-session.ts";
+import { orchestratorRpc } from "./rpc.ts";
+import {
+  makeSessionClient,
+  type BuiltinSubagentTool,
+  type OpenCodeSessionApi,
+  type SubagentToolContext,
+} from "../opencode-session.ts";
 import type { StorageLike } from "../store.ts";
 import type { TaskSpec } from "../types.ts";
 
@@ -99,12 +105,31 @@ export default Plugin.define({
 
     const registry = createRegistry(deps);
     const reconciliation = await registry.reconcile();
+    await registerAssets(context, registry);
+    await context.rpc.register(orchestratorRpc, {
+      async snapshot(input: unknown) {
+        const sessionID = readString(input as Record<string, unknown>, "sessionID");
+        return { status: await registry.statusForSession(sessionID) };
+      },
+    } as never);
 
     await context.tool.transform((editor: ToolEditor) => {
       editor.namespace({
         name: "orchestrator",
         description: "Create and control subagent graph runs. Write task titles and prompts in simplified technical English.",
       });
+
+      const builtinSubagent = editor.get("subagent");
+      const clientFor = (toolContext: ToolContext) => {
+        if (!builtinSubagent) {
+          throw new Error("the builtin subagent tool is not available");
+        }
+        return makeSessionClient(
+          context.session as unknown as OpenCodeSessionApi,
+          builtinSubagent as unknown as BuiltinSubagentTool,
+          toolContext as unknown as SubagentToolContext,
+        );
+      };
 
       editor.add({
         name: "start",
@@ -124,8 +149,23 @@ export default Plugin.define({
           required: ["goal", "tasks"],
         },
         options: { namespace: "orchestrator" },
-        async execute(input: unknown) {
-          return runTool(() => registry.start(readStart(input as Record<string, unknown>)));
+        async execute(input: unknown, toolContext: ToolContext) {
+          const start = readStart(input as Record<string, unknown>);
+          start.owner = {
+            sessionID: toolContext.sessionID,
+            agent: toolContext.agent,
+            directory: context.location.directory,
+          };
+          return runTool(async () => {
+            const created = await registry.start(start);
+            await context.session.synthetic({
+              sessionID: toolContext.sessionID,
+              text: `Orchestrator run ${created.runID} is ready for approval.`,
+              delivery: "queue",
+              resume: false,
+            });
+            return created;
+          });
         },
       });
 
@@ -138,8 +178,21 @@ export default Plugin.define({
           required: ["runID"],
         },
         options: { namespace: "orchestrator" },
-        async execute(input: unknown) {
-          return runTool(() => registry.approve(readRunID(input as Record<string, unknown>)));
+        async execute(input: unknown, toolContext: ToolContext) {
+          return runTool(async () => {
+            const approved = await registry.approve(readRunID(input as Record<string, unknown>), clientFor(toolContext), {
+              sessionID: toolContext.sessionID,
+              agent: toolContext.agent,
+              directory: context.location.directory,
+            });
+            await context.session.synthetic({
+              sessionID: toolContext.sessionID,
+              text: `Orchestrator run ${approved.runID} started.`,
+              delivery: "queue",
+              resume: false,
+            });
+            return approved;
+          });
         },
       });
 
@@ -267,6 +320,76 @@ export default Plugin.define({
     }
   },
 });
+
+interface CommandRegistry {
+  status(runID?: string): Promise<unknown>;
+  report(runID?: string): Promise<string>;
+}
+
+async function registerAssets(context: Context, registry: CommandRegistry): Promise<void> {
+  const asset = async (relativePath: string) => {
+    const url = new URL(`../../resources/${relativePath}`, import.meta.url);
+    return { path: url.pathname, content: await readFile(url, "utf8") };
+  };
+  const planToDag = await asset("skills/plan-to-dag/SKILL.md");
+  const runControl = await asset("skills/run-control/SKILL.md");
+
+  await context.skill.transform((editor) => {
+    editor.add({
+      id: "plan-to-dag",
+      name: "plan-to-dag",
+      description: "Convert an approved implementation plan into an orchestration task graph.",
+      path: planToDag.path,
+      content: planToDag.content,
+    } as never);
+    editor.add({
+      id: "run-control",
+      name: "run-control",
+      description: "Control and inspect a subagent graph run.",
+      path: runControl.path,
+      content: runControl.content,
+    } as never);
+  });
+
+  await context.command.transform((editor) => {
+    editor.add({
+      name: "orchestrate",
+      description: "Plan and approve an orchestration run for a goal.",
+      async execute(input) {
+        await context.session.synthetic({
+          sessionID: input.sessionID,
+          text: `Create an orchestration plan for this goal. Do not approve the task graph until the user approves it.\n\nGoal:\n${JSON.stringify(input.prompt)}`,
+          delivery: "steer",
+        });
+      },
+    });
+    editor.add({
+      name: "orchestrator-status",
+      description: "Show orchestration status without a model request.",
+      async execute(input) {
+        await context.session.synthetic({
+          sessionID: input.sessionID,
+          text: JSON.stringify(await registry.status(), null, 2),
+          delivery: "queue",
+          resume: false,
+        });
+      },
+    });
+    editor.add({
+      name: "orchestrator-report",
+      description: "Write an orchestration HTML report without a model request.",
+      async execute(input) {
+        const path = await registry.report();
+        await context.session.synthetic({
+          sessionID: input.sessionID,
+          text: `Report written to ${path}`,
+          delivery: "queue",
+          resume: false,
+        });
+      },
+    });
+  });
+}
 
 function adaptStorage(context: Context): StorageLike {
   return {

@@ -1,17 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { makeSessionClient, type OpenCodeSessionApi } from "../src/opencode-session.ts";
+import {
+  makeSessionClient,
+  type BuiltinSubagentTool,
+  type OpenCodeSessionApi,
+  type SubagentToolContext,
+} from "../src/opencode-session.ts";
 
 function fakeSessionDomain() {
   const calls: string[] = [];
   const domain: OpenCodeSessionApi = {
-    async create(input) {
-      calls.push(`create:${input.title}:${input.agent}:${input.model?.providerID}/${input.model?.id}:${input.location?.directory}`);
-      return { id: "ses_1", cost: 0, tokens: { input: 0, output: 0 } };
-    },
-    async prompt(input) {
-      calls.push(`prompt:${input.sessionID}:${input.text.slice(0, 12)}`);
-      return {};
-    },
     async wait(input) {
       calls.push(`wait:${input.sessionID}`);
     },
@@ -29,13 +26,29 @@ function fakeSessionDomain() {
       return {};
     },
   };
-  return { domain, calls };
+  const tool: BuiltinSubagentTool = {
+    async execute(input, context) {
+      calls.push(`subagent:${input.agent}:${input.model}:${input.background}:${input.description}`);
+      await context.progress({ sessionID: "ses_1", status: "running" });
+      return { output: { sessionID: "ses_1", status: "running" } };
+    },
+  };
+  const parent: SubagentToolContext = {
+    sessionID: "parent-1",
+    agent: "build",
+    messageID: "msg-1",
+    id: "tool-1",
+    signal: AbortSignal.timeout(1000),
+    async progress() {},
+  };
+  return { domain, tool, parent, calls };
 }
 
 describe("makeSessionClient", () => {
-  test("runs create, prompt, wait, get and maps the outcome", async () => {
-    const { domain, calls } = fakeSessionDomain();
-    const client = makeSessionClient(domain);
+  test("dispatches through the builtin subagent tool and maps the outcome", async () => {
+    const { domain, tool, parent, calls } = fakeSessionDomain();
+    const client = makeSessionClient(domain, tool, parent);
+    const started: string[] = [];
 
     const handle = await client.run({
       title: "ops/a",
@@ -43,6 +56,9 @@ describe("makeSessionClient", () => {
       model: "anthropic/claude-haiku-4-5",
       directory: "/proj",
       prompt: "Implement task a.",
+      onStarted: async (sessionID) => {
+        started.push(sessionID);
+      },
     });
 
     expect(handle).toEqual({
@@ -51,41 +67,29 @@ describe("makeSessionClient", () => {
       costUSD: 0.05,
       tokens: { input: 100, output: 200 },
     });
+    expect(started).toEqual(["ses_1"]);
     expect(calls).toEqual([
-      "create:ops/a:engineer:anthropic/claude-haiku-4-5:/proj",
-      "prompt:ses_1:Implement ta",
+      "subagent:engineer:anthropic/claude-haiku-4-5:true:ops/a",
       "wait:ses_1",
       "get:ses_1",
     ]);
   });
 
-  test("interrupts a session", async () => {
-    const { domain, calls } = fakeSessionDomain();
-    const client = makeSessionClient(domain);
+  test("rejects a builtin tool result without a child session", async () => {
+    const { domain, parent } = fakeSessionDomain();
+    const tool: BuiltinSubagentTool = { async execute() { return { output: {} }; } };
+    const client = makeSessionClient(domain, tool, parent);
+
+    await expect(client.run({ title: "t", agent: "engineer", model: "a/b", directory: "/d", prompt: "p" }))
+      .rejects.toThrow("did not return a child session ID");
+  });
+
+  test("interrupts a child session", async () => {
+    const { domain, tool, parent, calls } = fakeSessionDomain();
+    const client = makeSessionClient(domain, tool, parent);
 
     await client.interrupt("ses_9");
 
     expect(calls).toEqual(["interrupt:ses_9"]);
-  });
-
-  test("skips model parsing when the ref has no slash", async () => {
-    const { domain, calls } = fakeSessionDomain();
-    const client = makeSessionClient(domain);
-
-    await client.run({ title: "t", agent: "engineer", model: "", directory: "/d", prompt: "p" });
-
-    expect(calls[0]).toBe("create:t:engineer:undefined/undefined:/d");
-  });
-
-  test("maps missing outcome to failed", async () => {
-    const { domain, calls } = fakeSessionDomain();
-    domain.get = async () => ({ id: "ses_1", cost: 0, tokens: { input: 0, output: 0 } });
-    const client = makeSessionClient(domain);
-
-    const handle = await client.run({ title: "t", agent: "engineer", model: "a/b", directory: "/d", prompt: "p" });
-
-    expect(handle.outcome).toBe("failed");
-    expect(handle.costUSD).toBe(0);
-    expect(handle.tokens).toEqual({ input: 0, output: 0 });
   });
 });

@@ -2,28 +2,22 @@ import { describe, expect, test } from "bun:test";
 import { completedAssistantUsage } from "../src/runtime/assistant-usage.ts";
 
 describe("completedAssistantUsage", () => {
-  test("returns cost and tokens from a completed assistant update", () => {
+  test("returns cost and tokens from a V2 session usage event", () => {
     const usage = completedAssistantUsage({
-      type: "message.updated",
+      type: "session.usage.updated",
       properties: {
-        info: {
-          id: "message-1",
-          role: "assistant",
-          sessionID: "session-1",
-          time: { created: 1, completed: 2 },
-          cost: 0.02,
-          tokens: {
-            input: 10,
-            output: 20,
-            reasoning: 3,
-            cache: { read: 4, write: 5 },
-          },
+        sessionID: "session-1",
+        cost: 0.02,
+        tokens: {
+          input: 10,
+          output: 20,
+          reasoning: 3,
+          cache: { read: 4, write: 5 },
         },
       },
     });
 
     expect(usage).toEqual({
-      messageID: "message-1",
       sessionID: "session-1",
       cost: 0.02,
       inputTokens: 10,
@@ -34,20 +28,15 @@ describe("completedAssistantUsage", () => {
     });
   });
 
-  test("ignores an assistant update with no message info", () => {
+  test("ignores a V1 message event", () => {
     expect(completedAssistantUsage({ type: "message.updated", properties: {} })).toBeUndefined();
   });
 
-  test("ignores an assistant update before completion", () => {
+  test("ignores an incomplete usage event", () => {
     expect(
       completedAssistantUsage({
-        type: "message.updated",
-        properties: {
-          info: {
-            role: "assistant",
-            time: { created: 1 },
-          },
-        },
+        type: "session.usage.updated",
+        properties: { sessionID: "session-1", cost: 0.02, tokens: { input: 1 } },
       }),
     ).toBeUndefined();
   });
