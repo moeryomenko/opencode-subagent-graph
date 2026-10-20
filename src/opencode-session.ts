@@ -107,7 +107,17 @@ export function makeSessionClient(
         progress: async (update) => {
           const child = typeof update.sessionID === "string" ? update.sessionID : undefined;
           if (child) await reportStarted(child);
-          await parent.progress(update);
+          /*
+           * Background child progress can arrive after the parent tool call
+           * has returned. OpenCode rejects a progress update in that window,
+           * which would fail an otherwise healthy child. Progress is only
+           * cosmetic here, so never let it abort the dispatch.
+           */
+          try {
+            await parent.progress(update);
+          } catch {
+            /* Parent call is no longer running; the child remains valid. */
+          }
         },
       };
 
