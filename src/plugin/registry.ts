@@ -3,12 +3,17 @@ import { makeSessionClient, type OpenCodeSessionApi, type OrchestratorSessionCli
 import { createRun, getRun, listRuns, recordEvent, updateRun, type StorageLike } from "../store.ts";
 import { toTaskStates, validatePlan } from "../plan.ts";
 import type { RunOwner, RunState, TaskSpec } from "../types.ts";
+import type { ModelPolicyEntry } from "../model-policy.ts";
 
 export interface RegistryDeps {
   storage: StorageLike;
   sessions: OpenCodeSessionApi;
   /** Project root that engineer sessions run in. */
   directory: string;
+  modelPolicy?: ModelPolicyEntry[];
+  classify?: (task: import("../types.ts").TaskState, model: string) => Promise<{ complexity?: "simple" | "medium" | "complex"; costUSD?: number }>;
+  createWorktree?: (input: { name: string; from?: string; branch?: string }) => Promise<{ directory: string }>;
+  integrateWorktree?: (input: { directory: string; targetBranch: string }) => Promise<void>;
   /** Persist a static HTML report; returns the written path. */
   writeReport: (path: string, html: string) => Promise<void>;
 }
@@ -23,6 +28,7 @@ export interface StartInput {
   maxAttempts?: number;
   maxParallel?: number;
   owner?: RunOwner;
+  modelPolicy?: ModelPolicyEntry[];
 }
 
 export interface RunDetail {
@@ -76,8 +82,12 @@ export function createRegistry(deps: RegistryDeps) {
     workdir: deps.directory,
     agent: run.engineerAgent,
     modelChain: run.modelChain,
+    modelPolicy: run.modelPolicy ?? deps.modelPolicy,
     maxAttempts: run.maxAttempts,
     maxParallel: run.maxParallel,
+    classify: deps.classify,
+    createWorktree: deps.createWorktree,
+    integrateWorktree: deps.integrateWorktree,
   });
 
   function spawn(runID: string, driverClient: SessionClientLike = client) {
@@ -94,6 +104,7 @@ export function createRegistry(deps: RegistryDeps) {
       () => activeDrivers.delete(promise),
     );
   }
+
 
   async function requireRun(runID: string): Promise<RunState> {
     const run = await getRun(deps.storage, runID);
@@ -116,6 +127,7 @@ export function createRegistry(deps: RegistryDeps) {
         title: task.title,
         status: task.status,
         attempts: task.attempts.length,
+        role: task.role ?? "engineer",
         lastAttempt: {
           model: task.attempts.at(-1)?.model,
           outcome: task.attempts.at(-1)?.outcome,
@@ -144,6 +156,7 @@ export function createRegistry(deps: RegistryDeps) {
         tasks: input.tasks,
         engineerAgent: input.engineerAgent,
         modelChain: input.modelChain,
+        modelPolicy: input.modelPolicy ?? deps.modelPolicy,
         maxAttempts: input.maxAttempts,
         maxParallel: input.maxParallel,
         owner: input.owner,

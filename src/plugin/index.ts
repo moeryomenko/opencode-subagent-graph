@@ -2,6 +2,8 @@ import { Plugin } from "@opencode/plugin";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import type { ToolContext, ToolEditor } from "@opencode/plugin/promise/tool";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { createRegistry, type RegistryDeps, type StartInput } from "./registry.ts";
 import { orchestratorRpc } from "./rpc.ts";
 import {
@@ -12,6 +14,9 @@ import {
 } from "../opencode-session.ts";
 import type { StorageLike } from "../store.ts";
 import type { TaskSpec } from "../types.ts";
+import { classifyComplexity, validateModelPolicy } from "../model-policy.ts";
+
+const execFileAsync = promisify(execFile);
 
 /** Narrow readers for the JSON-schema tool inputs. */
 function readString(input: Record<string, unknown>, key: string): string {
@@ -36,7 +41,7 @@ function readRunID(input: Record<string, unknown>): string {
   return readString(input, "runID");
 }
 
-function readTasks(input: Record<string, unknown>): TaskSpec[] {
+export function readTasks(input: Record<string, unknown>): TaskSpec[] {
   const raw = input.tasks;
   if (!Array.isArray(raw)) {
     throw new Error("input tasks must be an array");
@@ -58,12 +63,17 @@ function readTasks(input: Record<string, unknown>): TaskSpec[] {
       }
       return dep;
     });
+    const role = readOptionalString(task, "role");
+    if (role !== undefined && !["engineer", "researcher", "explorer", "classifier"].includes(role)) {
+      throw new Error(`task ${id} role must be engineer, researcher, explorer, or classifier`);
+    }
     return {
       id,
       title,
       prompt,
       dependsOn,
       model: readOptionalString(task, "model"),
+      role: role as TaskSpec["role"],
     };
   });
 }
@@ -96,10 +106,40 @@ async function runTool(step: () => Promise<unknown>): Promise<{ content: string 
 export default Plugin.define({
   id: "subagent-graph",
   async setup(context: Context) {
+    const pluginOptions = context.options as unknown as Record<string, unknown>;
+    const modelPolicy = pluginOptions.models === undefined ? undefined : validateModelPolicy(pluginOptions.models);
+    let classifierClient: ReturnType<typeof makeSessionClient> | undefined;
     const deps: RegistryDeps = {
       storage: adaptStorage(context),
       sessions: context.session as unknown as OpenCodeSessionApi,
       directory: context.location.directory,
+      modelPolicy,
+      classify: async (task, model) => {
+        if (!classifierClient) throw new Error("classifier dispatch is not active");
+        const result = await classifierClient.run({
+          title: `Classify ${task.id}`,
+          agent: "classifier",
+          model,
+          directory: context.location.directory,
+          prompt: `Classify task complexity. Return exactly {"complexity":"simple"|"medium"|"complex"}.\nTitle: ${task.title}\nPrompt: ${task.prompt}\nDependencies: ${task.dependsOn.length}`,
+        });
+        return { complexity: classifyComplexity(result.output ?? ""), costUSD: result.costUSD };
+      },
+      createWorktree: async (input) => {
+        const created = await context.worktree.create({
+        projectID: context.location.project.id,
+        name: input.name,
+        from: input.from,
+        });
+        await execFileAsync("git", ["-C", created.directory, "checkout", "-b", input.name]);
+        return created;
+      },
+      integrateWorktree: async (input) => {
+        await execFileAsync("git", ["-C", input.directory, "add", "-A"]);
+        await execFileAsync("git", ["-C", input.directory, "commit", "-m", `orchestrator: integrate ${input.targetBranch}`]);
+        const { stdout: branch } = await execFileAsync("git", ["-C", input.directory, "branch", "--show-current"]);
+        await execFileAsync("git", ["-C", context.location.directory, "merge", "--no-ff", "--no-edit", branch.trim()]);
+      },
       writeReport: (path, html) => writeReportFile(path, html),
     };
 
@@ -113,7 +153,7 @@ export default Plugin.define({
       },
     } as never);
 
-    await context.tool.transform((editor: ToolEditor) => {
+      await context.tool.transform((editor: ToolEditor) => {
       editor.namespace({
         name: "orchestrator",
         description: "Create and control subagent graph runs. Write task titles and prompts in simplified technical English.",
@@ -124,11 +164,12 @@ export default Plugin.define({
         if (!builtinSubagent) {
           throw new Error("the builtin subagent tool is not available");
         }
-        return makeSessionClient(
+        classifierClient = makeSessionClient(
           context.session as unknown as OpenCodeSessionApi,
           builtinSubagent as unknown as BuiltinSubagentTool,
           toolContext as unknown as SubagentToolContext,
         );
+        return classifierClient;
       };
 
       editor.add({
@@ -138,7 +179,21 @@ export default Plugin.define({
           type: "object",
           properties: {
             goal: { type: "string" },
-            tasks: { type: "array" },
+            tasks: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string" },
+                  title: { type: "string" },
+                  prompt: { type: "string" },
+                  dependsOn: { type: "array", items: { type: "string" } },
+                  model: { type: "string" },
+                  role: { type: "string", enum: ["engineer", "researcher", "explorer", "classifier"] },
+                },
+                required: ["id", "title", "prompt", "dependsOn"],
+              },
+            },
             budgetUSD: { type: "number" },
             integrationBranch: { type: "string" },
             engineerAgent: { type: "string" },

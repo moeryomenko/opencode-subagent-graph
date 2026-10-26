@@ -19,6 +19,7 @@ export interface OpenCodeSessionApi {
       reasoning?: number;
       cache?: { read?: number; write?: number };
     };
+    output?: unknown;
   }>;
   interrupt(input: { sessionID: string }): Promise<unknown>;
 }
@@ -93,6 +94,7 @@ export function makeSessionClient(
           outcome: info.outcome ?? "failed",
           costUSD: info.cost ?? 0,
           tokens: { input: info.tokens?.input ?? 0, output: info.tokens?.output ?? 0 },
+          output: typeof info.output === "string" ? info.output : undefined,
         };
       }
 
@@ -107,17 +109,7 @@ export function makeSessionClient(
         progress: async (update) => {
           const child = typeof update.sessionID === "string" ? update.sessionID : undefined;
           if (child) await reportStarted(child);
-          /*
-           * Background child progress can arrive after the parent tool call
-           * has returned. OpenCode rejects a progress update in that window,
-           * which would fail an otherwise healthy child. Progress is only
-           * cosmetic here, so never let it abort the dispatch.
-           */
-          try {
-            await parent.progress(update);
-          } catch {
-            /* Parent call is no longer running; the child remains valid. */
-          }
+          await parent.progress(update).catch(() => undefined);
         },
       };
 
@@ -147,6 +139,7 @@ export function makeSessionClient(
           input: info.tokens?.input ?? 0,
           output: info.tokens?.output ?? 0,
         },
+        output: typeof info.output === "string" ? info.output : undefined,
       };
     },
     async interrupt(sessionID) {

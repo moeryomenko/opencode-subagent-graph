@@ -1,12 +1,14 @@
 import { isRunFinished, readyTasks } from "../plan.ts";
 import { getRun, recordEvent, updateRun, type StorageLike } from "../store.ts";
 import type { Attempt, ModelRef, RunState, TaskState } from "../types.ts";
+import { complexityTier, nextTier, selectPolicyEntry, type ModelPolicyEntry } from "../model-policy.ts";
 
 export interface SessionHandle {
   id: string;
   outcome: "succeeded" | "failed" | "interrupted";
   costUSD: number;
   tokens: { input: number; output: number };
+  output?: string;
 }
 
 /** Minimal session surface the engine needs. */
@@ -17,6 +19,7 @@ export interface SessionClientLike {
     model: ModelRef;
     directory: string;
     prompt: string;
+    worktree?: boolean;
     /** Called as soon as the builtin tool reports the child session. */
     onStarted?: (sessionID: string) => Promise<void>;
   }): Promise<SessionHandle>;
@@ -27,6 +30,10 @@ export interface EngineOptions {
   agent: string;
   /** Escalation chain used by tasks without a per-task model. */
   modelChain: ModelRef[];
+  modelPolicy?: ModelPolicyEntry[];
+  classify?: (task: TaskState, model: ModelRef) => Promise<{ complexity?: "simple" | "medium" | "complex"; costUSD?: number }>;
+  createWorktree?: (input: { name: string; from?: string; branch?: string }) => Promise<{ directory: string }>;
+  integrateWorktree?: (input: { directory: string; targetBranch: string }) => Promise<void>;
   maxAttempts?: number;
   maxParallel?: number;
 }
@@ -194,8 +201,41 @@ async function attemptTask(
     return "done";
   }
 
+  if (options.modelPolicy?.length && !task.model && !task.complexity) {
+    const cheapest = options.modelPolicy.find((entry) => entry.budget === "cheaper") ?? options.modelPolicy[0];
+    let complexity: "simple" | "medium" | "complex" | undefined = options.classify
+      ? undefined
+      : task.prompt.length < 500 && task.dependsOn.length === 0 ? "simple" : "medium";
+    if (options.classify && cheapest) {
+      try {
+        const classification = await options.classify(task, cheapest.model);
+        complexity = classification.complexity;
+        if (classification.costUSD) {
+          await updateRun(storage, runID, async (current) => { current.costUSD += classification.costUSD ?? 0; });
+        }
+      } catch { /* medium fallback */ }
+    }
+    await updateRun(storage, runID, async (current) => {
+      const currentTask = current.tasks.find((candidate) => candidate.id === taskID);
+      if (!currentTask) return;
+      currentTask.complexity = complexity ?? "medium";
+      current.complexity ??= {};
+      current.complexity[taskID] = currentTask.complexity;
+      await recordEvent(current, "task_classified", `${taskID} -> ${currentTask.complexity}`);
+    });
+  }
+  run = await getRun(storage, runID);
+  if (!run || run.status !== "running") return "done";
+  const classifiedTask = run.tasks.find((candidate) => candidate.id === taskID);
+  if (!classifiedTask) return "done";
   // Reserve the slot before any network work.
-  const attempt: Attempt = { model: modelFor(task, options.modelChain), startedAt: Date.now() };
+  const selectedModel = modelFor(classifiedTask, options);
+  const attempt: Attempt = { model: selectedModel, budget: options.modelPolicy?.find((entry) => entry.model === selectedModel)?.budget, startedAt: Date.now() };
+  let directory = options.workdir;
+  if (classifiedTask.role === "explorer" && options.createWorktree) {
+    directory = (await options.createWorktree({ name: `${runID}-${taskID}`, from: options.workdir })).directory;
+    await updateRun(storage, runID, async (current) => { current.worktrees[taskID] = directory; });
+  }
   run = await updateRun(storage, runID, async (current) => {
     const currentTask = current.tasks.find((candidate) => candidate.id === taskID);
     if (!currentTask) return;
@@ -207,10 +247,11 @@ async function attemptTask(
   try {
     const handle = await client.run({
       title: `${run?.goal ?? runID} / ${taskID}`,
-      agent: options.agent,
+      agent: classifiedTask.role ?? options.agent,
       model: attempt.model,
-      directory: options.workdir,
+      directory,
       prompt: task.prompt,
+      worktree: classifiedTask.role === "explorer",
       onStarted: async (sessionID) => {
         await updateRun(storage, runID, async (current) => {
           const currentTask = current.tasks.find((candidate) => candidate.id === taskID);
@@ -232,12 +273,18 @@ async function attemptTask(
         tokens: handle.tokens,
       },
       maxAttempts,
+      integrationBranch: run?.integrationBranch,
+      integrateWorktree: options.integrateWorktree,
+      worktree: run?.worktrees[taskID],
     });
   } catch (error) {
     return await settleTask(storage, runID, taskID, {
       success: false,
       session: { id: "", finishedAt: Date.now(), outcome: "failed" },
       maxAttempts,
+      integrationBranch: run?.integrationBranch,
+      integrateWorktree: options.integrateWorktree,
+      worktree: run?.worktrees[taskID],
       error: error instanceof Error ? error.message : String(error),
     });
   }
@@ -252,6 +299,9 @@ async function settleTask(
     session: { id: string; finishedAt: number; outcome: "passed" | "failed"; costUSD?: number; tokens?: { input: number; output: number } };
     maxAttempts: number;
     error?: string;
+    integrationBranch?: string;
+    integrateWorktree?: (input: { directory: string; targetBranch: string }) => Promise<void>;
+    worktree?: string;
   },
 ): Promise<"retry" | "done"> {
   let willRetry = false;
@@ -282,6 +332,9 @@ async function settleTask(
     }
 
     if (input.success) {
+      if (input.worktree && input.integrateWorktree && input.integrationBranch) {
+        await input.integrateWorktree({ directory: input.worktree, targetBranch: input.integrationBranch });
+      }
       task.status = "passed";
       await recordEvent(run, "task_passed", taskID);
     } else {
@@ -316,12 +369,29 @@ async function settleTask(
   return input.success || !willRetry ? "done" : "retry";
 }
 
-function modelFor(task: TaskState, modelChain: ModelRef[]): ModelRef {
+function modelFor(task: TaskState, options: EngineOptions): ModelRef {
   if (task.model) {
     return task.model;
   }
-  const index = Math.min(task.attempts.length, modelChain.length - 1);
-  return modelChain[index] ?? modelChain[0];
+  if (options.modelPolicy && options.modelPolicy.length > 0) {
+    const complexity = task.complexity ?? "medium";
+    const preferred = complexityTier(complexity);
+    const attemptsByModel = Object.fromEntries(task.attempts.map((attempt) => [attempt.model,
+      task.attempts.filter((candidate) => candidate.model === attempt.model).length]));
+    const previous = task.attempts.at(-1);
+    const previousEntry = previous && options.modelPolicy.find((entry) => entry.model === previous.model);
+    const previousAttempts = previous ? attemptsByModel[previous.model] ?? 0 : 0;
+    const escalation = previousEntry && previousAttempts >= previousEntry.retry
+      ? nextTier(options.modelPolicy, previousEntry.budget)
+      : undefined;
+    const selected = selectPolicyEntry(options.modelPolicy, escalation ?? previousEntry?.budget ?? preferred, attemptsByModel);
+    return selected?.model
+      ?? options.modelPolicy.find((entry) => entry.budget === "expensive")?.model
+      ?? options.modelPolicy.at(-1)?.model
+      ?? options.modelChain[0];
+  }
+  const index = Math.min(task.attempts.length, options.modelChain.length - 1);
+  return options.modelChain[index] ?? options.modelChain[0];
 }
 
 function hasUnfinishedWork(run: RunState): boolean {

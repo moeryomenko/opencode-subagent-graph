@@ -33,6 +33,9 @@ export function validatePlan(plan: PlanInput): string[] {
     if (task.model !== undefined && typeof task.model !== "string") {
       throw new PlanError(`task ${task.id} has a non-string model`);
     }
+    if (task.role !== undefined && !["engineer", "researcher", "explorer", "classifier"].includes(task.role)) {
+      throw new PlanError(`task ${task.id} has an invalid role`);
+    }
     ids.add(task.id);
   }
 
