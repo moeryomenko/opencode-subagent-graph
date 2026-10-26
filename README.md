@@ -20,8 +20,35 @@ Requires OpenCode V2 (>= 2.0.32) with the `@opencode/plugin` (V2) API.
    { "plugins": ["./.opencode/plugins/orchestrator"] }
    ```
 
-3. Keep `.opencode/agent/engineer.md` in the project; orchestrator tasks run as
-   that subagent.
+3. Keep the builtin role definitions in `.opencode/agent/`; tasks default to
+   `engineer` and may select `researcher`, `explorer`, or `classifier`.
+
+### Model policy
+
+Pass plugin options in the global or project `opencode.json(c)` configuration.
+OpenCode applies project options over global options. The project `models` list
+replaces the global list:
+
+```jsonc
+{
+  "plugins": [{
+    "package": "./.opencode/plugins/orchestrator",
+    "options": {
+      "models": [
+        { "model": "provider/model", "retry": 2, "budget": "cheaper" },
+        { "model": "provider/medium", "retry": 1, "budget": "medium" },
+        { "model": "provider/expensive", "retry": 1, "budget": "expensive" }
+      ]
+    }
+  }]
+}
+```
+
+`retry` is the total number of attempts for that model and must be positive.
+Simple tasks start on `cheaper`; medium and complex tasks start on `medium`.
+Failures escalate to the next available tier, so expensive models are used
+only after a failed attempt. Explicit task models bypass automatic routing.
+Without a policy, the legacy `modelChain` behavior remains available.
 
 ## Tools
 
@@ -56,6 +83,8 @@ All tools are exposed to the model in the `orchestrator` namespace.
   resume automatically (reconcile at setup).
 - Tasks with `model` use it for the first attempt; later attempts fall through
   `modelChain`.
+- Task `role` defaults to `engineer`; use `researcher`, `explorer`, or
+  `classifier` to select the corresponding builtin OpenCode agent.
 
 ## Development
 

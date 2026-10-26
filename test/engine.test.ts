@@ -105,6 +105,53 @@ describe("driveRun", () => {
     expect(calls).toEqual(["custom/one"]);
   });
 
+  test("routes simple tasks to cheaper policy models and escalates on failure", async () => {
+    storage = new MemoryStorage();
+    const created = await createRun(storage, {
+      ...newRun,
+      modelPolicy: [
+        { model: "p/cheap", retry: 1, budget: "cheaper" },
+        { model: "p/medium", retry: 1, budget: "medium" },
+        { model: "p/expensive", retry: 1, budget: "expensive" },
+      ],
+    });
+    const { client, calls } = sequentialClient([{ outcome: "failed" }, {}]);
+
+    await driveRun(storage, created.id, client, {
+      workdir: "/proj", agent: "engineer", modelChain: ["legacy"], maxAttempts: 2,
+      modelPolicy: [
+        { model: "p/cheap", retry: 1, budget: "cheaper" },
+        { model: "p/medium", retry: 1, budget: "medium" },
+      ],
+    });
+
+    expect(calls).toEqual(["p/cheap", "p/medium"]);
+  });
+
+  test("uses builtin classifier results and charges classification cost", async () => {
+    storage = new MemoryStorage();
+    const created = await createRun(storage, {
+      ...newRun,
+      modelPolicy: [
+        { model: "p/cheap", retry: 1, budget: "cheaper" },
+        { model: "p/medium", retry: 1, budget: "medium" },
+      ],
+    });
+    const { client, calls } = sequentialClient([]);
+    await driveRun(storage, created.id, client, {
+      workdir: "/proj", agent: "engineer", modelChain: ["legacy"],
+      classify: async () => ({ complexity: "medium", costUSD: 0.01 }),
+      modelPolicy: [
+        { model: "p/cheap", retry: 1, budget: "cheaper" },
+        { model: "p/medium", retry: 1, budget: "medium" },
+      ],
+    });
+    const run = await import("../src/store.ts").then((m) => m.getRun(storage, created.id));
+    expect(calls).toEqual(["p/medium"]);
+    expect(run?.costUSD).toBe(0.02);
+    expect(run?.tasks[0].complexity).toBe("medium");
+  });
+
   test("runs tasks in dependency order", async () => {
     storage = new MemoryStorage();
     const created = await createRun(storage, { ...newRun, tasks: [task("b", ["a"]), task("a")] });

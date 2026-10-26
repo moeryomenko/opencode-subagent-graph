@@ -1,5 +1,7 @@
 export type ModelRef = string; // "provider/model[#variant]"
 
+export type TaskRole = "engineer" | "researcher" | "explorer" | "classifier";
+
 export interface TaskSpec {
   id: string;
   /** Short human-readable summary. Must be written in simplified technical English. */
@@ -8,6 +10,7 @@ export interface TaskSpec {
   dependsOn: string[];
   /** Optional model used for the first attempt; later attempts escalate. */
   model?: ModelRef;
+  role?: TaskRole;
 }
 
 export interface PlanInput {
@@ -23,6 +26,7 @@ export type TaskStatus =
 
 export interface Attempt {
   model: ModelRef;
+  budget?: import("./model-policy.ts").BudgetTier;
   startedAt: number;
   finishedAt?: number;
   outcome?: "passed" | "failed";
@@ -34,6 +38,7 @@ export interface Attempt {
 export interface TaskState extends TaskSpec {
   status: TaskStatus;
   attempts: Attempt[];
+  complexity?: "simple" | "medium" | "complex";
 }
 
 export type RunStatus =
@@ -74,6 +79,8 @@ export interface RunState extends PlanInput {
   engineerAgent: string;
   /** Escalation chain used by tasks without a per-task model. */
   modelChain: ModelRef[];
+  modelPolicy?: import("./model-policy.ts").ModelPolicyEntry[];
+  complexity?: Record<string, "simple" | "medium" | "complex">;
   maxAttempts: number;
   maxParallel: number;
   /** taskID -> created worktree directory. */

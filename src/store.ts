@@ -46,6 +46,7 @@ export interface NewRunInput extends PlanInput {
   integrationBranch: string;
   engineerAgent?: string;
   modelChain?: string[];
+  modelPolicy?: import("./model-policy.ts").ModelPolicyEntry[];
   maxAttempts?: number;
   maxParallel?: number;
   owner?: RunOwner;
@@ -78,6 +79,7 @@ export async function createRun(storage: StorageLike, input: NewRunInput): Promi
     integrationBranch: input.integrationBranch,
     engineerAgent: input.engineerAgent ?? "engineer",
     modelChain: input.modelChain && input.modelChain.length > 0 ? input.modelChain : ["opencode/beam-free"],
+    modelPolicy: input.modelPolicy,
     maxAttempts: input.maxAttempts && input.maxAttempts > 0 ? Math.min(input.maxAttempts, 10) : 3,
     maxParallel: input.maxParallel && input.maxParallel > 0 ? Math.min(input.maxParallel, 8) : 2,
     worktrees: {},
